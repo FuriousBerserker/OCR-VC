@@ -13,8 +13,8 @@
 #include <list>
 #include <map>
 #include <set>
-#include <string>
 #include <sstream>
+#include <string>
 #include "ocr-types.h"
 #include "pin.H"
 
@@ -37,12 +37,14 @@ class Metadata {
     enum ObjectType { EDT, DB, EVENT };
     list<ocrGuid_t> controlDependences;
     ObjectType type;
+    u64 subscribes;
     Metadata(ObjectType type);
     bool isEdt();
     bool isDB();
     bool isEvent();
-    void addControlDependence(ocrGuid_t& guid);
+    //    void addControlDependence(ocrGuid_t& guid);
     bool hasControlDependence();
+    bool hasSubscribe();
 };
 
 class VC {
@@ -204,20 +206,39 @@ bool GuidComparator::operator()(const ocrGuid_t& key1,
     return key1.guid < key2.guid ? true : false;
 }
 
-Metadata::Metadata(ObjectType type) : type(type) {}
+Metadata::Metadata(ObjectType type) : type(type), subscribes(0) {}
 
 inline bool Metadata::isEdt() { return this->type == EDT; }
 
 inline bool Metadata::isDB() { return this->type == DB; }
 
 inline bool Metadata::isEvent() { return this->type == EVENT; }
-
-inline void Metadata::addControlDependence(ocrGuid_t& guid) {
-    this->controlDependences.push_back(guid);
-}
+// inline void Metadata::addControlDependence(ocrGuid_t& guid) {
+//    this->controlDependences.push_back(guid);
+//}
 
 inline bool Metadata::hasControlDependence() {
     return !this->controlDependences.empty();
+}
+
+inline bool Metadata::hasSubscribe() { return this->subscribes != 0; }
+
+inline void addControlDependence(ocrGuid_t& src, ocrGuid_t& dst) {
+    dpMap[dst]->controlDependences.push_back(src);
+    dpMap[src]->subscribes++;
+}
+
+inline void removeOCROBject(ocrGuid_t& guid) {
+    delete dpMap[guid];
+    dpMap.erase(guid);
+    delete vcMap[guid];
+    vcMap.erase(guid);
+}
+inline void cleanSubscribe(ocrGuid_t& src) {
+    dpMap[src]->subscribes--;
+    if (dpMap[src]->subscribes == 0) {
+        removeOCROBject(src);
+    }
 }
 
 VC::VC(bool compress) : compress(compress), epoch(DEFAULT_EPOCH) {
@@ -307,8 +328,9 @@ string VC::toString() const {
             ss << this->epoch;
             ss << '\n';
         } else {
-            for (map<ocrGuid_t, u64>::const_iterator ci = this->clockMap.begin(),
-                                               ce = this->clockMap.end();
+            for (map<ocrGuid_t, u64>::const_iterator
+                     ci = this->clockMap.begin(),
+                     ce = this->clockMap.end();
                  ci != ce; ci++) {
                 ss << hex << ci->first.guid << dec;
                 ss << " -> ";
@@ -318,7 +340,7 @@ string VC::toString() const {
         }
     } else {
         for (map<ocrGuid_t, u64>::const_iterator ci = this->clockMap.begin(),
-                                           ce = this->clockMap.end();
+                                                 ce = this->clockMap.end();
              ci != ce; ci++) {
             ss << hex << ci->first.guid << dec;
             ss << " -> ";
@@ -331,8 +353,8 @@ string VC::toString() const {
 
 inline bool operator<=(const VC& vc1, const VC& vc2) {
     assert(vc1.isCompressed() && !vc2.isCompressed());
-//    cout << vc1.toString() << endl;
-//    cout << vc2.toString() << endl;
+    //    cout << vc1.toString() << endl;
+    //    cout << vc2.toString() << endl;
     bool result = true;
     if (vc1.isEpoch()) {
         u64 epoch = vc2.search(vc1.guid);
@@ -544,7 +566,7 @@ void afterEdtCreate(ocrGuid_t guid, ocrGuid_t templateGuid, u32 paramc,
         VC* childVC = new VC(false);
         vcMap[guid] = childVC;
     }
-    
+
     if (!isNullGuid(outputEvent)) {
         vcMap[outputEvent] = new VC(false);
     }
@@ -553,7 +575,7 @@ void afterEdtCreate(ocrGuid_t guid, ocrGuid_t templateGuid, u32 paramc,
 
     if (!isNullGuid(outputEvent)) {
         dpMap[outputEvent] = new Metadata(Metadata::EVENT);
-        dpMap[outputEvent]->addControlDependence(guid);
+        addControlDependence(guid, outputEvent);
     }
 #if DEBUG
     cout << "afterEdtCreate finish" << endl;
@@ -603,7 +625,7 @@ void afterAddDependence(ocrGuid_t source, ocrGuid_t destination, u32 slot,
         assert(dpMap[source]);
         assert(dpMap[destination]);
         if (!dpMap[source]->isDB()) {
-            dpMap[destination]->addControlDependence(source);
+            addControlDependence(source, destination);
         }
     }
 #if DEBUG
@@ -616,7 +638,7 @@ void afterEventSatisfy(ocrGuid_t edtGuid, ocrGuid_t eventGuid,
 #if DEBUG
     cout << "afterEventSatisfy" << endl;
 #endif
-    dpMap[eventGuid]->addControlDependence(edtGuid);
+    addControlDependence(edtGuid, eventGuid);
 #if DEBUG
     cout << "afterEventSatisfy finish" << endl;
 #endif
@@ -633,12 +655,13 @@ void preEdt(THREADID tid, ocrGuid_t edtGuid, u32 paramc, u64* paramv, u32 depc,
                                    ge = metadata->controlDependences.end();
          gi != ge; gi++) {
         vc->merge(*vcMap[*gi]);
-//         cout << "merge edt guid = " << hex << gi->guid << endl;
-//        cout << vcMap[*gi]->toString() << endl;
+        cleanSubscribe(*gi);
+        //         cout << "merge edt guid = " << hex << gi->guid << endl;
+        //        cout << vcMap[*gi]->toString() << endl;
     }
     selfIncrement(edtGuid);
-//    cout << "edt guid = " << hex << edtGuid.guid << endl;
-//    cout << vc->toString() << endl;
+    //    cout << "edt guid = " << hex << edtGuid.guid << endl;
+    //    cout << vc->toString() << endl;
     initializeTLS(edtGuid, depc, depv, tid);
 #if DEBUG
     cout << "preEdt finish" << endl;
@@ -668,12 +691,29 @@ void afterEventPropagate(ocrGuid_t eventGuid) {
     Metadata* metadata = dpMap[eventGuid];
     VC* vc = vcMap[eventGuid];
     if (metadata->hasControlDependence()) {
-        for (list<ocrGuid_t>::iterator gi = metadata->controlDependences.begin(), ge = metadata->controlDependences.end(); gi != ge; gi++) {
+        for (list<ocrGuid_t>::iterator
+                 gi = metadata->controlDependences.begin(),
+                 ge = metadata->controlDependences.end();
+             gi != ge; gi++) {
             vc->merge(*vcMap[*gi]);
+            cleanSubscribe(*gi);
         }
     }
 #if DEBUG
     cout << "afterEventPropagate finish" << endl;
+#endif
+}
+
+void afterEdtTerminate(ocrGuid_t edtGuid) {
+#if DEBUG
+    cout << "afterEdtTerminate" << endl;
+#endif
+    map<ocrGuid_t, Metadata*>::iterator mi = dpMap.find(edtGuid);
+    if (mi != dpMap.end() && mi->second->hasSubscribe()) {
+        removeOCROBject(edtGuid);
+    }
+#if DEBUG
+    cout << "afterEdtTerminate finish" << endl;
 #endif
 }
 
@@ -877,6 +917,21 @@ void overload(IMG img, void* v) {
                                  IARG_FUNCARG_ENTRYPOINT_VALUE, 0, IARG_END);
             PROTO_Free(proto_notifyEventPropagate);
         }
+
+        // replace notifyEdtTerminate
+        rtn = RTN_FindByName(img, "notifyEdtTerminate");
+        if (RTN_Valid(rtn)) {
+#if DEBUG
+            cout << "replace notifyEdtTerminate";
+            PROTO proto_notifyEdtTerminate = PROTO_Allocate(
+                PIN_PARG(void), CALLINGSTD_DEFAULT, "notifyEdtTerminate",
+                PIN_PARG_AGGREGATE(ocrGuid_t), PIN_PARG_END());
+            RTN_ReplaceSignature(rtn, AFUNPTR(afterEdtTerminate),
+                                 IARG_PROTOTYPE, proto_notifyEdtTerminate,
+                                 IARG_FUNCARG_ENTRYPOINT_VALUE, 0, IARG_END);
+            PROTO_Free(proto_notifyEdtTerminate);
+#endif
+        }
     }
 }
 
@@ -902,13 +957,12 @@ void outputRaceInfo(ADDRINT ip1, bool ip1IsRead, ADDRINT ip2, bool ip2IsRead) {
     PIN_GetSourceLocation(ip1, &ip1Column, &ip1Line, &ip1File);
     PIN_GetSourceLocation(ip2, &ip2Column, &ip2Line, &ip2File);
     PIN_UnlockClient();
-    
+
     cout << ip1Type << "-" << ip2Type << " race detect!" << endl;
     cout << "first op is " << ip1 << " in " << ip1File << ": " << ip1Line
          << ": " << ip1Column << endl;
     cout << "second op is " << ip2 << " in " << ip2File << ": " << ip2Line
          << ": " << ip2Column << endl;
-
 }
 
 void checkDataRace(ADDRINT ip, VC* vc, bool isRead, BytePage* bytePage,
