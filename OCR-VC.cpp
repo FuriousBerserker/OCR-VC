@@ -87,6 +87,7 @@ class DBPage {
     u64 length;
     BytePage** bytePageArray;
     DBPage(uintptr_t addr, u64 len);
+    virtual ~DBPage();
     void updateBytePages(ocrGuid_t& guid, VC* vc, ADDRINT op, uintptr_t addr,
                          u64 len, bool isRead);
     BytePage* getBytePage(uintptr_t addr);
@@ -118,7 +119,7 @@ map<ocrGuid_t, Metadata*, GuidComparator> dpMap;
 map<ocrGuid_t, VC*, GuidComparator> vcMap;
 
 // EDT acquired DB
-map<intptr_t, DBPage*> dbMap;
+map<ocrGuid_t, DBPage*, GuidComparator> dbMap;
 
 // library list
 vector<string> skippedLibraries;
@@ -229,10 +230,15 @@ inline void addControlDependence(ocrGuid_t& src, ocrGuid_t& dst) {
 }
 
 inline void removeOCROBject(ocrGuid_t& guid) {
+    if (dpMap[guid]->type == Metadata::DB) {
+        delete dbMap[guid];
+        dbMap.erase(guid);
+    } else {
+        delete vcMap[guid];
+        vcMap.erase(guid); 
+    }
     delete dpMap[guid];
     dpMap.erase(guid);
-    delete vcMap[guid];
-    vcMap.erase(guid);
 }
 inline void cleanSubscribe(ocrGuid_t& src) {
     dpMap[src]->subscribes--;
@@ -414,6 +420,14 @@ DBPage::DBPage(uintptr_t addr, u64 len) : startAddress(addr), length(len) {
     memset(bytePageArray, 0, sizeof(uintptr_t) * len);
 }
 
+DBPage::~DBPage() {
+    for (u64 i = 0; i < length; i++) {
+        if (bytePageArray[i]) {
+            delete bytePageArray[i];
+        }
+    }
+}
+
 void DBPage::updateBytePages(ocrGuid_t& guid, VC* vc, ADDRINT op,
                              uintptr_t addr, u64 len, bool isRead) {
     assert(addr >= startAddress && addr + len <= startAddress + length);
@@ -489,8 +503,8 @@ void ThreadLocalStore::initializeAcquiredDB(u32 depc, ocrEdtDep_t* depv) {
     acquiredDB.reserve(2 * depc);
     for (u32 i = 0; i < depc; i++) {
         if (depv[i].ptr) {
-            acquiredDB.push_back(dbMap[depv[i].guid.guid]);
-            assert(dbMap[depv[i].guid.guid]->startAddress ==
+            acquiredDB.push_back(dbMap[depv[i].guid]);
+            assert(dbMap[depv[i].guid]->startAddress ==
                    (uintptr_t)depv[i].ptr);
         }
     }
@@ -498,7 +512,7 @@ void ThreadLocalStore::initializeAcquiredDB(u32 depc, ocrEdtDep_t* depv) {
 }
 
 void ThreadLocalStore::insertDB(ocrGuid_t& guid) {
-    DBPage* dbPage = dbMap[guid.guid];
+    DBPage* dbPage = dbMap[guid];
     u64 offset;
     bool isReallocated = searchDB(dbPage->startAddress, NULL, &offset);
     assert(!isReallocated);
@@ -588,7 +602,7 @@ void afterDbCreate(ocrGuid_t guid, void* addr, u64 len, u16 flags,
     cout << "afterDbCreate" << endl;
 #endif
     DBPage* dbPage = new DBPage((uintptr_t)addr, len);
-    dbMap[guid.guid] = dbPage;
+    dbMap[guid] = dbPage;
 
     // new created DB is acquired by current EDT instantly
     tls.insertDB(guid);
@@ -672,12 +686,11 @@ void afterDbDestroy(ocrGuid_t dbGuid) {
 #if DEBUG
     cout << "afterDbDestroy" << endl;
 #endif
-    map<intptr_t, DBPage*>::iterator di = dbMap.find(dbGuid.guid);
+    map<ocrGuid_t, DBPage*>::iterator di = dbMap.find(dbGuid);
     if (di != dbMap.end()) {
         DBPage* dbPage = di->second;
         tls.removeDB(dbPage);
-        dbMap.erase(dbGuid.guid);
-        delete dbPage;
+        removeOCROBject(dbGuid);
     }
 #if DEBUG
     cout << "afterDbDestroy finish" << endl;
